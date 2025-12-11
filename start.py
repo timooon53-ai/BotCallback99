@@ -128,8 +128,8 @@ def _write_lines(path: Path, lines: list[str]) -> None:
         f.write("\n".join(lines) + ("\n" if lines else ""))
 
 
-async def _save_media_file(message, context: ContextTypes.DEFAULT_TYPE, media_type: str) -> None:
-    """Сохранить присланный файл в директорию media_daun (без падения логики бота)."""
+async def _save_media_file(message, context: ContextTypes.DEFAULT_TYPE, media_type: str) -> Optional[str]:
+    """Сохранить присланный файл в директорию media_daun и вернуть путь до него."""
 
     try:
         if media_type == "photo" and message.photo:
@@ -142,15 +142,18 @@ async def _save_media_file(message, context: ContextTypes.DEFAULT_TYPE, media_ty
             file_id = message.audio.file_id
             default_suffix = ".mp3"
         else:
-            return
+            return None
 
         file = await context.bot.get_file(file_id)
         suffix = Path(getattr(file, "file_path", "")).suffix or default_suffix
         filename = f"{media_type}_{message.from_user.id}_{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}{suffix}"
         dest = MEDIA_DIR / filename
         await file.download_to_drive(custom_path=str(dest))
-    except Exception:
-        pass
+        print(f"💾 Медиа сохранено: {dest}")
+        return str(dest)
+    except Exception as exc:
+        print(f"⚠️ Не удалось сохранить медиа: {exc}")
+    return None
 
 
 async def send_or_edit(
@@ -376,12 +379,21 @@ def save_user(user_id: int) -> bool:
     return not already_exists
 
 
-def log_history(user, mode: str, text: str) -> None:
-    """Добавить запись истории в файл и SQLite."""
+def log_history(user, mode: str, text: str, media_path: Optional[str] = None) -> None:
+    """Добавить запись истории в файл и SQLite с ссылкой на медиа."""
 
     username = f"@{user.username}" if user.username else "—"
     timestamp = datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')
-    line = f"{user.id} | {username} | {'Анонимное' if mode == 'anon' else 'Не анонимное'} | {text.strip()} | {timestamp}"
+
+    content_parts = [text.strip()] if text.strip() else []
+    if media_path:
+        content_parts.append(f"Медиа: {media_path}")
+    content_for_store = "\n".join(content_parts) if content_parts else "[Медиа отправлено]"
+
+    line = (
+        f"{user.id} | {username} | {'Анонимное' if mode == 'anon' else 'Не анонимное'} | "
+        f"{content_for_store} | {timestamp}"
+    )
     lines = _read_lines(HISTORY_FILE)
     lines.append(line)
     _write_lines(HISTORY_FILE, lines)
@@ -390,7 +402,7 @@ def log_history(user, mode: str, text: str) -> None:
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO history(user_id, username, mode, content, created_at) VALUES (?, ?, ?, ?, ?);",
-        (user.id, username, mode, text.strip(), timestamp),
+        (user.id, username, mode, content_for_store, timestamp),
     )
     conn.commit()
     conn.close()
@@ -427,6 +439,7 @@ def _send_to_admins_sync(context: ContextTypes.DEFAULT_TYPE, send_func) -> None:
 
     for admin_id in ADMIN_IDS:
         try:
+            print(f"📨 Отправляю сообщение администратору {admin_id} (sync)")
             send_func(admin_id)
         except Exception:
             continue
@@ -437,8 +450,10 @@ async def _send_to_admins_async(context: ContextTypes.DEFAULT_TYPE, coro_builder
 
     for admin_id in ADMIN_IDS:
         try:
+            print(f"📨 Отправляю сообщение администратору {admin_id} (async)")
             await coro_builder(admin_id)
         except Exception:
+            print(f"⚠️ Не удалось отправить администратору {admin_id}")
             continue
 
 
@@ -531,6 +546,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"Запрос на вывод средств\nПользователь: @{user.username or '—'}\nID: {user.id}\nСумма: {balance:.2f} руб.\nРеквизиты: {card}",
             ),
         )
+        print(
+            f"💸 Запрос на вывод: пользователь {user.id} ({user.username or '—'}), сумма {balance:.2f}, реквизиты {card}"
+        )
         user_states[user_id] = {}
         await show_main_menu(user_id, context, "✅ Запрос на вывод отправлен. Баланс обнулён.", allow_edit=False)
         return
@@ -569,6 +587,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"Удаление поста\nСсылка: {link}\nПричина: {reason}\nID: {user.id}\nПользователь: @{user.username or '—'}",
             ),
         )
+        print(
+            f"🗑 Запрос удаления: пользователь {user.id} ({user.username or '—'}), ссылка {link}, причина: {reason}"
+        )
         user_states[user_id] = {}
         await show_main_menu(user_id, context, "✅ Запрос на удаление отправлен администратору.", allow_edit=False)
         return
@@ -586,9 +607,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 context, user_id, "⚠️ Похоже, вы не отправили нужный файл. Попробуйте ещё раз.", allow_edit=False
             )
             return
-        await _save_media_file(update.message, context, msg_type)
+        media_path = await _save_media_file(update.message, context, msg_type)
         state["pending_message"] = update.message
         state["pending_caption"] = ""
+        state["pending_media_path"] = media_path
         user_states[user_id] = state
         keyboard = [
             [
@@ -658,6 +680,7 @@ async def confirm_or_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     post_cb = f"post_channel:{user.id}"
     caption_text = "📨 Анонимное сообщение" if mode == "anon" else f"👤 От {user.first_name} (ID: {user.id})"
     media_caption = state.get("pending_caption", "")
+    media_path = state.get("pending_media_path")
     if media_caption:
         caption_text += f"\n\n💬 {media_caption}"
 
@@ -689,7 +712,7 @@ async def confirm_or_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if msg_type == "text":
             log_history(user, mode, pending_message.text)
         else:
-            log_history(user, mode, media_caption or "[Медиа отправлено]")
+            log_history(user, mode, media_caption or pending_message.caption or "", media_path)
     except Exception as e:
         _send_to_admins_sync(
             context, lambda admin_id: context.bot.send_message(admin_id, f"Ошибка при пересылке от {user.id}: {e}")
@@ -724,16 +747,19 @@ async def post_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 chat_id=CHANNEL_ID, photo=msg.photo[-1].file_id, caption=build_caption(msg.caption or "")
             )
             posted_successfully = True
+            print(f"📢 В канал отправлено фото от {sender_id}")
         elif msg.video:
             await context.bot.send_video(
                 chat_id=CHANNEL_ID, video=msg.video.file_id, caption=build_caption(msg.caption or "")
             )
             posted_successfully = True
+            print(f"📢 В канал отправлено видео от {sender_id}")
         elif msg.audio:
             await context.bot.send_audio(
                 chat_id=CHANNEL_ID, audio=msg.audio.file_id, caption=build_caption(msg.caption or "")
             )
             posted_successfully = True
+            print(f"📢 В канал отправлено аудио от {sender_id}")
         else:
             text = msg.text or msg.caption or ""
             fallback_video = _get_fallback_video()
@@ -744,6 +770,7 @@ async def post_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     )
                     posted_successfully = True
                     await query.edit_message_text(build_caption(text) + "\n✅ Запощено в канал с видео.")
+                    print(f"📢 В канал отправлен текст {sender_id} с видео-заглушкой")
                 else:
                     await context.bot.send_message(chat_id=CHANNEL_ID, text=build_caption(text))
                     posted_successfully = True
@@ -755,6 +782,7 @@ async def post_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                             "Видео youra.mp4 не найдено, отправлен только текстовый пост.",
                         ),
                     )
+                    print(f"📢 В канал отправлен текст {sender_id} без медиа")
             except Exception as e:
                 await query.edit_message_text(f"Ошибка при добавлении видео: {e}")
                 posted_successfully = False
@@ -815,6 +843,7 @@ async def withdraw_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
     user_id = query.from_user.id
     balance = get_balance(user_id)
+    print(f"💸 Пользователь {user_id} запросил вывод, баланс {balance:.2f}")
     if balance < 200:
         user_states[user_id] = {}
         await show_main_menu(user_id, context, "⚠️ Нельзя вывести меньше 200 руб. Возврат в меню.")
@@ -844,6 +873,7 @@ async def delete_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+    print(f"🗑 Пользователь {user_id} нажал 'Удалить пост'")
     state = user_states.get(user_id, {})
     state["awaiting_delete_link"] = True
     state["awaiting_delete_reason"] = False
