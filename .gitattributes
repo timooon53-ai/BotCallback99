@@ -1,0 +1,14 @@
+* text=auto eol=lf
+*.py diff linguist-language=Python
+*.md text
+*.txt text
+*.json text
+*.yaml text
+*.yml text
+*.gitignore text
+*.db -diff
+*.sqlite -diff
+*.sqlite3 -diff
+*.mp4 -diff
+*.mov -diff
+data/* -diff

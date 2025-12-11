@@ -9,9 +9,6 @@
 /main_s_podpisiy.py
 /main_bez_podpisi.py
 /users.txt
-/bin
-/obj
-/project.depend
 __pycache__/
 *.pyc
 *.db
