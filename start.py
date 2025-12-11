@@ -40,6 +40,10 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
+# Каталог для сохранения всех входящих медиафайлов.
+MEDIA_DIR = BASE_DIR / "media_daun"
+MEDIA_DIR.mkdir(exist_ok=True)
+
 # Пути к файлам с пользователями, историей и балансами.
 USERS_FILE = DATA_DIR / "users.txt"
 HISTORY_FILE = DATA_DIR / "history.txt"
@@ -124,24 +128,51 @@ def _write_lines(path: Path, lines: list[str]) -> None:
         f.write("\n".join(lines) + ("\n" if lines else ""))
 
 
+async def _save_media_file(message, context: ContextTypes.DEFAULT_TYPE, media_type: str) -> None:
+    """Сохранить присланный файл в директорию media_daun (без падения логики бота)."""
+
+    try:
+        if media_type == "photo" and message.photo:
+            file_id = message.photo[-1].file_id
+            default_suffix = ".jpg"
+        elif media_type == "video" and message.video:
+            file_id = message.video.file_id
+            default_suffix = ".mp4"
+        elif media_type == "audio" and message.audio:
+            file_id = message.audio.file_id
+            default_suffix = ".mp3"
+        else:
+            return
+
+        file = await context.bot.get_file(file_id)
+        suffix = Path(getattr(file, "file_path", "")).suffix or default_suffix
+        filename = f"{media_type}_{message.from_user.id}_{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}{suffix}"
+        dest = MEDIA_DIR / filename
+        await file.download_to_drive(custom_path=str(dest))
+    except Exception:
+        pass
+
+
 async def send_or_edit(
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
     text: str,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
+    *,
+    allow_edit: bool = True,
 ) -> None:
     """Отправить новое сообщение или отредактировать последнее от бота."""
 
     state = user_states.setdefault(user_id, {})
     message_id = state.get("last_bot_message_id")
-    try:
-        if message_id:
+    if allow_edit and message_id:
+        try:
             message = await context.bot.edit_message_text(
                 chat_id=user_id, message_id=message_id, text=text, reply_markup=reply_markup
             )
-        else:
-            raise Exception("Нет сообщения для редактирования")
-    except Exception:
+        except Exception:
+            message = await context.bot.send_message(user_id, text, reply_markup=reply_markup)
+    else:
         message = await context.bot.send_message(user_id, text, reply_markup=reply_markup)
     state["last_bot_message_id"] = message.message_id
     user_states[user_id] = state
@@ -167,8 +198,8 @@ def build_main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def sync_db_from_files() -> None:
-    """Перезалить данные из текстовых файлов в SQLite и обновить текстовые копии."""
+def sync_db_from_files() -> Dict[str, int]:
+    """Перезалить данные из текстовых файлов в SQLite, обновить копии и вернуть статистику."""
 
     conn = _get_db_connection()
     cur = conn.cursor()
@@ -239,11 +270,18 @@ def sync_db_from_files() -> None:
             "SELECT user_id, username, mode, content, created_at FROM history ORDER BY id;"
         )
     ]
+    counts = {
+        "users": len(users_for_file),
+        "balances": len(balances_for_file),
+        "history": len(history_for_file),
+    }
     conn.close()
 
     _write_lines(USERS_FILE, users_for_file)
     _write_lines(BALANCE_FILE, balances_for_file)
     _write_lines(HISTORY_FILE, history_for_file)
+
+    return counts
 
 
 def _get_fallback_video() -> Optional[InputFile]:
@@ -375,11 +413,13 @@ def count_user_posts(user_id: int) -> int:
 
 
 # ======================== ГЛАВНОЕ МЕНЮ ========================
-async def show_main_menu(user_id: int, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+async def show_main_menu(
+    user_id: int, context: ContextTypes.DEFAULT_TYPE, text: str, *, allow_edit: bool = True
+) -> None:
     """Показать главное меню, отмечая, имеет ли пользователь права админа."""
 
     is_admin = user_id == PRIMARY_ADMIN_ID
-    await send_or_edit(context, user_id, text, build_main_menu(is_admin))
+    await send_or_edit(context, user_id, text, build_main_menu(is_admin), allow_edit=allow_edit)
 
 
 def _send_to_admins_sync(context: ContextTypes.DEFAULT_TYPE, send_func) -> None:
@@ -423,6 +463,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             user_id,
             "⚠️ Для использования бота нужно подписаться на канал @Mind4Not0Found4.\n\nПосле подписки нажмите /start снова.",
             reply_markup,
+            allow_edit=False,
         )
         return
 
@@ -431,7 +472,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         set_balance(user_id, prev + 1.0)
 
     user_states.setdefault(user_id, {})
-    await show_main_menu(user_id, context, "Привет! 👋 Выбери действие:")
+    await show_main_menu(user_id, context, "Привет! 👋 Выбери действие:", allow_edit=False)
 
 
 async def choose_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -491,7 +532,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ),
         )
         user_states[user_id] = {}
-        await show_main_menu(user_id, context, "✅ Запрос на вывод отправлен. Баланс обнулён.")
+        await show_main_menu(user_id, context, "✅ Запрос на вывод отправлен. Баланс обнулён.", allow_edit=False)
         return
 
     if state.get("awaiting_broadcast") and user_id == PRIMARY_ADMIN_ID:
@@ -505,7 +546,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except Exception:
                 failed += 1
         user_states[user_id] = {}
-        await show_main_menu(user_id, context, f"✅ Рассылка завершена. Успешно: {sent}, ошибок: {failed}.")
+        await show_main_menu(
+            user_id, context, f"✅ Рассылка завершена. Успешно: {sent}, ошибок: {failed}.", allow_edit=False
+        )
         return
 
     if state.get("awaiting_delete_link") and update.message.text:
@@ -513,7 +556,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         state["awaiting_delete_link"] = False
         state["awaiting_delete_reason"] = True
         user_states[user_id] = state
-        await send_or_edit(context, user_id, "✏️ Введите причину удаления поста:")
+        await send_or_edit(context, user_id, "✏️ Введите причину удаления поста:", allow_edit=False)
         return
 
     if state.get("awaiting_delete_reason") and update.message.text:
@@ -527,11 +570,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ),
         )
         user_states[user_id] = {}
-        await show_main_menu(user_id, context, "✅ Запрос на удаление отправлен администратору.")
+        await show_main_menu(user_id, context, "✅ Запрос на удаление отправлен администратору.", allow_edit=False)
         return
 
     if not state:
-        await show_main_menu(user_id, context, "⚠️ Сначала нажмите /start для выбора действия.")
+        await show_main_menu(user_id, context, "⚠️ Сначала нажмите /start для выбора действия.", allow_edit=False)
         return
 
     msg_type = state.get("type")
@@ -539,8 +582,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if (msg_type == "photo" and not update.message.photo) or (
             msg_type == "video" and not update.message.video
         ) or (msg_type == "audio" and not update.message.audio):
-            await send_or_edit(context, user_id, "⚠️ Похоже, вы не отправили нужный файл. Попробуйте ещё раз.")
+            await send_or_edit(
+                context, user_id, "⚠️ Похоже, вы не отправили нужный файл. Попробуйте ещё раз.", allow_edit=False
+            )
             return
+        await _save_media_file(update.message, context, msg_type)
         state["pending_message"] = update.message
         state["pending_caption"] = ""
         user_states[user_id] = state
@@ -551,7 +597,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 InlineKeyboardButton("❌ Отменить", callback_data="cancel_send"),
             ]
         ]
-        await send_or_edit(context, user_id, "Медиа получено. Добавить подпись или отправить?", InlineKeyboardMarkup(keyboard))
+        await send_or_edit(
+            context,
+            user_id,
+            "Медиа получено. Добавить подпись или отправить?",
+            InlineKeyboardMarkup(keyboard),
+            allow_edit=False,
+        )
         return
 
     if msg_type == "text" and update.message.text:
@@ -560,7 +612,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         keyboard = [
             [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_send"), InlineKeyboardButton("❌ Отменить", callback_data="cancel_send")]
         ]
-        await send_or_edit(context, user_id, f"📄 Твой текст:\n\n{update.message.text}\n\nОтправить админу?", InlineKeyboardMarkup(keyboard))
+        await send_or_edit(
+            context,
+            user_id,
+            f"📄 Твой текст:\n\n{update.message.text}\n\nОтправить админу?",
+            InlineKeyboardMarkup(keyboard),
+            allow_edit=False,
+        )
 
 
 async def add_caption_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -831,8 +889,17 @@ async def sync_db_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query.from_user.id != PRIMARY_ADMIN_ID:
         await query.answer("⛔ Недостаточно прав", show_alert=True)
         return
-    sync_db_from_files()
-    await send_or_edit(context, query.from_user.id, "🔄 Синхронизация завершена успешно.")
+    counts = sync_db_from_files()
+    await send_or_edit(
+        context,
+        query.from_user.id,
+        (
+            "🔄 Синхронизация завершена успешно.\n"
+            f"👥 Пользователи: {counts['users']}\n"
+            f"💰 Балансы: {counts['balances']}\n"
+            f"📝 История: {counts['history']}"
+        ),
+    )
 
 
 async def caption_collector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -847,7 +914,13 @@ async def caption_collector(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         state.pop("awaiting_caption", None)
         user_states[user_id] = state
         keyboard = [[InlineKeyboardButton("✅ Отправить", callback_data="confirm_send"), InlineKeyboardButton("❌ Отменить", callback_data="cancel_send")]]
-        await send_or_edit(context, user_id, "✅ Подпись сохранена! Отправить сообщение админу?", InlineKeyboardMarkup(keyboard))
+        await send_or_edit(
+            context,
+            user_id,
+            "✅ Подпись сохранена! Отправить сообщение админу?",
+            InlineKeyboardMarkup(keyboard),
+            allow_edit=False,
+        )
 
 
 def main() -> None:
