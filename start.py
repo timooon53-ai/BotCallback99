@@ -291,7 +291,7 @@ def _get_fallback_video() -> Optional[InputFile]:
     """Вернуть видео-заглушку, если файл доступен."""
 
     if VIDEO_FALLBACK_PATH.exists():
-        return InputFile(VIDEO_FALLBACK_PATH)
+        return InputFile(VIDEO_FALLBACK_PATH.open("rb"), filename=VIDEO_FALLBACK_PATH.name)
     return None
 
 
