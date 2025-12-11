@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -102,6 +102,12 @@ def _init_db() -> None:
     conn.close()
 
 
+def _utc_now_iso() -> str:
+    """Вернуть ISO-строку с текущим временем в UTC."""
+
+    return datetime.now(UTC).isoformat()
+
+
 def _read_lines(path: Path) -> list[str]:
     """Безопасно прочитать строки из файла (если его нет, вернуть пустой список)."""
 
@@ -178,7 +184,7 @@ def sync_db_from_files() -> None:
             continue
         cur.execute(
             "INSERT OR IGNORE INTO users(user_id, created_at) VALUES (?, ?);",
-            (user_id, datetime.utcnow().isoformat()),
+            (user_id, _utc_now_iso()),
         )
 
     for line in _read_lines(BALANCE_FILE):
@@ -191,11 +197,11 @@ def sync_db_from_files() -> None:
                 continue
             cur.execute(
                 "INSERT OR IGNORE INTO users(user_id, created_at) VALUES (?, ?);",
-                (user_id, datetime.utcnow().isoformat()),
+                (user_id, _utc_now_iso()),
             )
             cur.execute(
                 "INSERT OR REPLACE INTO balances(user_id, balance, updated_at) VALUES (?, ?, ?);",
-                (user_id, balance, datetime.utcnow().isoformat()),
+                (user_id, balance, _utc_now_iso()),
             )
 
     for line in _read_lines(HISTORY_FILE):
@@ -211,7 +217,7 @@ def sync_db_from_files() -> None:
             created_at = parts[4].strip()
             cur.execute(
                 "INSERT OR IGNORE INTO users(user_id, created_at) VALUES (?, ?);",
-                (user_id, datetime.utcnow().isoformat()),
+                (user_id, _utc_now_iso()),
             )
             cur.execute(
                 """
@@ -275,11 +281,11 @@ def set_balance(user_id: int, balance: float) -> None:
     cur = conn.cursor()
     cur.execute(
         "INSERT OR IGNORE INTO users(user_id, created_at) VALUES (?, ?);",
-        (user_id, datetime.utcnow().isoformat()),
+        (user_id, _utc_now_iso()),
     )
     cur.execute(
         "INSERT OR REPLACE INTO balances(user_id, balance, updated_at) VALUES (?, ?, ?);",
-        (user_id, balance, datetime.utcnow().isoformat()),
+        (user_id, balance, _utc_now_iso()),
     )
     conn.commit()
     conn.close()
@@ -325,7 +331,7 @@ def save_user(user_id: int) -> bool:
     cur = conn.cursor()
     cur.execute(
         "INSERT OR IGNORE INTO users(user_id, created_at) VALUES (?, ?);",
-        (user_id, datetime.utcnow().isoformat()),
+        (user_id, _utc_now_iso()),
     )
     conn.commit()
     conn.close()
@@ -336,7 +342,7 @@ def log_history(user, mode: str, text: str) -> None:
     """Добавить запись истории в файл и SQLite."""
 
     username = f"@{user.username}" if user.username else "—"
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    timestamp = datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')
     line = f"{user.id} | {username} | {'Анонимное' if mode == 'anon' else 'Не анонимное'} | {text.strip()} | {timestamp}"
     lines = _read_lines(HISTORY_FILE)
     lines.append(line)
@@ -741,7 +747,7 @@ async def back_to_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     user_states.pop(query.from_user.id, None)
-    await show_main_menu(query.from_user.id, context, "Главное меню")
+    await show_main_menu(query.from_user.id, context, "🏠 Главное меню")
 
 
 async def withdraw_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -771,7 +777,7 @@ async def links_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         [InlineKeyboardButton("📢 Канал", url="https://t.me/+MRaBuj3Cx8gzZjEy")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
     ]
-    await send_or_edit(context, query.from_user.id, "Полезные ссылки:", InlineKeyboardMarkup(keyboard))
+    await send_or_edit(context, query.from_user.id, "🔗 Полезные ссылки:", InlineKeyboardMarkup(keyboard))
 
 
 async def delete_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -793,7 +799,7 @@ async def admin_panel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
     if query.from_user.id != PRIMARY_ADMIN_ID:
-        await query.answer("Недостаточно прав", show_alert=True)
+        await query.answer("⛔ Недостаточно прав", show_alert=True)
         return
     keyboard = [
         [InlineKeyboardButton("📨 Сделать рассылку", callback_data="broadcast_start")],
@@ -809,7 +815,7 @@ async def broadcast_start_handler(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
     if query.from_user.id != PRIMARY_ADMIN_ID:
-        await query.answer("Недостаточно прав", show_alert=True)
+        await query.answer("⛔ Недостаточно прав", show_alert=True)
         return
     state = user_states.get(query.from_user.id, {})
     state["awaiting_broadcast"] = True
@@ -823,7 +829,7 @@ async def sync_db_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     await query.answer()
     if query.from_user.id != PRIMARY_ADMIN_ID:
-        await query.answer("Недостаточно прав", show_alert=True)
+        await query.answer("⛔ Недостаточно прав", show_alert=True)
         return
     sync_db_from_files()
     await send_or_edit(context, query.from_user.id, "🔄 Синхронизация завершена успешно.")
