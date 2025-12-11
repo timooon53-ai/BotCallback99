@@ -14,8 +14,10 @@ from telegram.ext import (
 import os
 from datetime import datetime
 
+from cfg import TG_TOKEN
+
 # ----------------- Настройки -----------------
-TOKEN = "8239532613:AAGJ3IlG8kQDTTFb4yExUvDI3AsKIow9hNU"
+TOKEN = TG_TOKEN
 ADMIN_ID = 5625584447
 CHANNEL_ID = -1003146319472  # ID канала (проверка подписки)
 CHAT_ID = -1002908008015     # ID чата (проверка подписки)
