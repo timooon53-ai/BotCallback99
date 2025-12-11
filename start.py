@@ -20,19 +20,19 @@ from telegram.ext import (
     filters,
 )
 
-from cfg import TG_TOKEN
+from cfg import *
 
 # ----------------- Настройки -----------------
 # Токен бота, который берётся из внешнего файла конфигурации.
 TOKEN = TG_TOKEN
 # Основной администратор с правом открытия панели.
-PRIMARY_ADMIN_ID = 7515876699
+PRIMARY_ADMIN_ID = MAIN_ADMIN
 # Дополнительный администратор, получающий копии обращений.
-SECONDARY_ADMIN_ID = 7515876699
+SECONDARY_ADMIN_ID = SECOND_ADMIN
 # Список всех администраторов, которым пересылаются заявки.
 ADMIN_IDS = sorted({PRIMARY_ADMIN_ID, SECONDARY_ADMIN_ID})
 # Идентификатор канала для публикации одобренных постов.
-CHANNEL_ID = -1003146319472
+CHANNEL_ID = CHANNEL_FOR_PODPISKA
 
 # Корневая директория проекта.
 BASE_DIR = Path(__file__).resolve().parent
