@@ -820,11 +820,11 @@ async def post_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if posted_successfully and sender_id:
         try:
-            new_bal = await credit_user(sender_id, 15.0, context)
+            new_bal = await credit_user(sender_id, 16.0, context)
             await _send_to_admins_async(
                 context,
                 lambda admin_id: context.bot.send_message(
-                    admin_id, f"✅ Автору (ID {sender_id}) начислено 15 руб. Новый баланс: {new_bal:.2f} руб."
+                        admin_id, f"✅ Автору (ID HIDDEN) начислено 15 руб. Новый баланс: {new_bal:.2f} руб."
                 ),
             )
         except Exception:
