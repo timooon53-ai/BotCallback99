@@ -22,7 +22,7 @@ ADMIN_ID = 5625584447
 CHANNEL_ID = -1003146319472  # ID канала (проверка подписки)
 CHAT_ID = -1002908008015     # ID чата (проверка подписки)
 
-BASE_PATH = r"C:\Users\Administrator\PycharmProjects\Channel99Anon"
+BASE_PATH = r"C:\Users\Administrator\PycharmProjects\Bot99School"
 
 USERS_FILE = f"{BASE_PATH}\\users.txt"
 HISTORY_FILE = f"{BASE_PATH}\\history.txt"
