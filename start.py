@@ -128,8 +128,8 @@ def _write_lines(path: Path, lines: list[str]) -> None:
         f.write("\n".join(lines) + ("\n" if lines else ""))
 
 
-async def _save_media_file(message, context: ContextTypes.DEFAULT_TYPE, media_type: str) -> None:
-    """Сохранить присланный файл в директорию media_daun (без падения логики бота)."""
+async def _save_media_file(message, context: ContextTypes.DEFAULT_TYPE, media_type: str) -> Optional[str]:
+    """Сохранить присланный файл в директорию media_daun и вернуть путь до него."""
 
     try:
         if media_type == "photo" and message.photo:
@@ -142,15 +142,18 @@ async def _save_media_file(message, context: ContextTypes.DEFAULT_TYPE, media_ty
             file_id = message.audio.file_id
             default_suffix = ".mp3"
         else:
-            return
+            return None
 
         file = await context.bot.get_file(file_id)
         suffix = Path(getattr(file, "file_path", "")).suffix or default_suffix
         filename = f"{media_type}_{message.from_user.id}_{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}{suffix}"
         dest = MEDIA_DIR / filename
         await file.download_to_drive(custom_path=str(dest))
-    except Exception:
-        pass
+        print(f"💾 Медиа сохранено: {dest}")
+        return str(dest)
+    except Exception as exc:
+        print(f"⚠️ Не удалось сохранить медиа: {exc}")
+    return None
 
 
 async def send_or_edit(
@@ -288,7 +291,7 @@ def _get_fallback_video() -> Optional[InputFile]:
     """Вернуть видео-заглушку, если файл доступен."""
 
     if VIDEO_FALLBACK_PATH.exists():
-        return InputFile(VIDEO_FALLBACK_PATH)
+        return InputFile(VIDEO_FALLBACK_PATH.open("rb"), filename=VIDEO_FALLBACK_PATH.name)
     return None
 
 
@@ -376,12 +379,21 @@ def save_user(user_id: int) -> bool:
     return not already_exists
 
 
-def log_history(user, mode: str, text: str) -> None:
-    """Добавить запись истории в файл и SQLite."""
+def log_history(user, mode: str, text: str, media_path: Optional[str] = None) -> None:
+    """Добавить запись истории в файл и SQLite с ссылкой на медиа."""
 
     username = f"@{user.username}" if user.username else "—"
     timestamp = datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')
-    line = f"{user.id} | {username} | {'Анонимное' if mode == 'anon' else 'Не анонимное'} | {text.strip()} | {timestamp}"
+
+    content_parts = [text.strip()] if text.strip() else []
+    if media_path:
+        content_parts.append(f"Медиа: {media_path}")
+    content_for_store = "\n".join(content_parts) if content_parts else "[Медиа отправлено]"
+
+    line = (
+        f"{user.id} | {username} | {'Анонимное' if mode == 'anon' else 'Не анонимное'} | "
+        f"{content_for_store} | {timestamp}"
+    )
     lines = _read_lines(HISTORY_FILE)
     lines.append(line)
     _write_lines(HISTORY_FILE, lines)
@@ -390,7 +402,7 @@ def log_history(user, mode: str, text: str) -> None:
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO history(user_id, username, mode, content, created_at) VALUES (?, ?, ?, ?, ?);",
-        (user.id, username, mode, text.strip(), timestamp),
+        (user.id, username, mode, content_for_store, timestamp),
     )
     conn.commit()
     conn.close()
@@ -427,6 +439,7 @@ def _send_to_admins_sync(context: ContextTypes.DEFAULT_TYPE, send_func) -> None:
 
     for admin_id in ADMIN_IDS:
         try:
+            print(f"📨 Отправляю сообщение администратору {admin_id} (sync)")
             send_func(admin_id)
         except Exception:
             continue
@@ -437,8 +450,10 @@ async def _send_to_admins_async(context: ContextTypes.DEFAULT_TYPE, coro_builder
 
     for admin_id in ADMIN_IDS:
         try:
+            print(f"📨 Отправляю сообщение администратору {admin_id} (async)")
             await coro_builder(admin_id)
         except Exception:
+            print(f"⚠️ Не удалось отправить администратору {admin_id}")
             continue
 
 
@@ -522,17 +537,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if state.get("awaiting_withdraw") and update.message.text:
         card = update.message.text
+        state["withdraw_card"] = card
+        state["awaiting_withdraw"] = False
+        state["awaiting_withdraw_confirm"] = True
+        user_states[user_id] = state
         balance = get_balance(user_id)
-        set_balance(user_id, 0.0)
-        await _send_to_admins_async(
+        keyboard = [
+            [InlineKeyboardButton("✅ Подтвердить вывод", callback_data="withdraw_confirm")],
+            [InlineKeyboardButton("❌ Отменить", callback_data="withdraw_cancel")],
+        ]
+        await send_or_edit(
             context,
-            lambda admin_id: context.bot.send_message(
-                admin_id,
-                f"Запрос на вывод средств\nПользователь: @{user.username or '—'}\nID: {user.id}\nСумма: {balance:.2f} руб.\nРеквизиты: {card}",
-            ),
+            user_id,
+            f"💸 Реквизиты: {card}\nСумма к выводу: {balance:.2f} руб.\nПодтвердить вывод?",
+            InlineKeyboardMarkup(keyboard),
+            allow_edit=False,
         )
-        user_states[user_id] = {}
-        await show_main_menu(user_id, context, "✅ Запрос на вывод отправлен. Баланс обнулён.", allow_edit=False)
+        print(f"💸 Пользователь {user_id} указал реквизиты для вывода: {card}")
         return
 
     if state.get("awaiting_broadcast") and user_id == PRIMARY_ADMIN_ID:
@@ -562,15 +583,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if state.get("awaiting_delete_reason") and update.message.text:
         reason = update.message.text
         link = state.get("delete_link", "—")
-        await _send_to_admins_async(
+        state["delete_reason"] = reason
+        state["awaiting_delete_reason"] = False
+        state["awaiting_delete_confirm"] = True
+        user_states[user_id] = state
+        keyboard = [
+            [InlineKeyboardButton("✅ Подтвердить удаление", callback_data="delete_confirm")],
+            [InlineKeyboardButton("❌ Отменить", callback_data="delete_cancel")],
+        ]
+        await send_or_edit(
             context,
-            lambda admin_id: context.bot.send_message(
-                admin_id,
-                f"Удаление поста\nСсылка: {link}\nПричина: {reason}\nID: {user.id}\nПользователь: @{user.username or '—'}",
-            ),
+            user_id,
+            f"🔗 Ссылка: {link}\n✏️ Причина: {reason}\nОтправить запрос администратору?",
+            InlineKeyboardMarkup(keyboard),
+            allow_edit=False,
         )
-        user_states[user_id] = {}
-        await show_main_menu(user_id, context, "✅ Запрос на удаление отправлен администратору.", allow_edit=False)
+        print(
+            f"🗑 Пользователь {user.id} указал ссылку {link} и причину '{reason}', ожидает подтверждения"
+        )
+        return
+
+    if state.get("awaiting_caption") and update.message.text:
+        state["pending_caption"] = update.message.text
+        state.pop("awaiting_caption", None)
+        user_states[user_id] = state
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Отправить", callback_data="confirm_send"),
+                InlineKeyboardButton("❌ Отменить", callback_data="cancel_send"),
+            ]
+        ]
+        await send_or_edit(
+            context,
+            user_id,
+            "✅ Подпись сохранена! Отправить сообщение админу?",
+            InlineKeyboardMarkup(keyboard),
+            allow_edit=False,
+        )
         return
 
     if not state:
@@ -586,9 +635,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 context, user_id, "⚠️ Похоже, вы не отправили нужный файл. Попробуйте ещё раз.", allow_edit=False
             )
             return
-        await _save_media_file(update.message, context, msg_type)
+        media_path = await _save_media_file(update.message, context, msg_type)
         state["pending_message"] = update.message
         state["pending_caption"] = ""
+        state["pending_media_path"] = media_path
         user_states[user_id] = state
         keyboard = [
             [
@@ -658,38 +708,39 @@ async def confirm_or_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     post_cb = f"post_channel:{user.id}"
     caption_text = "📨 Анонимное сообщение" if mode == "anon" else f"👤 От {user.first_name} (ID: {user.id})"
     media_caption = state.get("pending_caption", "")
+    original_caption = pending_message.caption or "" if hasattr(pending_message, "caption") else ""
+    media_path = state.get("pending_media_path")
     if media_caption:
         caption_text += f"\n\n💬 {media_caption}"
+    elif original_caption:
+        caption_text += f"\n\n💬 {original_caption}"
 
     admin_keyboard = [[InlineKeyboardButton("📢 Запостить в канал", callback_data=post_cb)]]
     admin_markup = InlineKeyboardMarkup(admin_keyboard)
 
     async def send_to_admin(admin_id: int) -> None:
+        print(f"📨 Готовлю отправку сообщения пользователю {user_id} админу {admin_id}")
         if msg_type == "text":
             text_to_send = pending_message.text
             await context.bot.send_message(
                 chat_id=admin_id, text=f"{caption_text}\n\n{text_to_send}", reply_markup=admin_markup
             )
         else:
-            if msg_type == "photo":
-                await context.bot.send_photo(
-                    chat_id=admin_id, photo=pending_message.photo[-1].file_id, caption=caption_text, reply_markup=admin_markup
-                )
-            elif msg_type == "video":
-                await context.bot.send_video(
-                    chat_id=admin_id, video=pending_message.video.file_id, caption=caption_text, reply_markup=admin_markup
-                )
-            elif msg_type == "audio":
-                await context.bot.send_audio(
-                    chat_id=admin_id, audio=pending_message.audio.file_id, caption=caption_text, reply_markup=admin_markup
-                )
+            await context.bot.copy_message(
+                chat_id=admin_id,
+                from_chat_id=user_id,
+                message_id=pending_message.message_id,
+                caption=caption_text,
+                reply_markup=admin_markup,
+            )
+        print(f"✅ Сообщение пользователя {user_id} доставлено админу {admin_id}")
 
     try:
         await _send_to_admins_async(context, send_to_admin)
         if msg_type == "text":
             log_history(user, mode, pending_message.text)
         else:
-            log_history(user, mode, media_caption or "[Медиа отправлено]")
+            log_history(user, mode, media_caption or pending_message.caption or "", media_path)
     except Exception as e:
         _send_to_admins_sync(
             context, lambda admin_id: context.bot.send_message(admin_id, f"Ошибка при пересылке от {user.id}: {e}")
@@ -724,16 +775,19 @@ async def post_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 chat_id=CHANNEL_ID, photo=msg.photo[-1].file_id, caption=build_caption(msg.caption or "")
             )
             posted_successfully = True
+            print(f"📢 В канал отправлено фото от {sender_id}")
         elif msg.video:
             await context.bot.send_video(
                 chat_id=CHANNEL_ID, video=msg.video.file_id, caption=build_caption(msg.caption or "")
             )
             posted_successfully = True
+            print(f"📢 В канал отправлено видео от {sender_id}")
         elif msg.audio:
             await context.bot.send_audio(
                 chat_id=CHANNEL_ID, audio=msg.audio.file_id, caption=build_caption(msg.caption or "")
             )
             posted_successfully = True
+            print(f"📢 В канал отправлено аудио от {sender_id}")
         else:
             text = msg.text or msg.caption or ""
             fallback_video = _get_fallback_video()
@@ -744,6 +798,7 @@ async def post_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     )
                     posted_successfully = True
                     await query.edit_message_text(build_caption(text) + "\n✅ Запощено в канал с видео.")
+                    print(f"📢 В канал отправлен текст {sender_id} с видео-заглушкой")
                 else:
                     await context.bot.send_message(chat_id=CHANNEL_ID, text=build_caption(text))
                     posted_successfully = True
@@ -755,6 +810,7 @@ async def post_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                             "Видео youra.mp4 не найдено, отправлен только текстовый пост.",
                         ),
                     )
+                    print(f"📢 В канал отправлен текст {sender_id} без медиа")
             except Exception as e:
                 await query.edit_message_text(f"Ошибка при добавлении видео: {e}")
                 posted_successfully = False
@@ -764,11 +820,11 @@ async def post_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if posted_successfully and sender_id:
         try:
-            new_bal = await credit_user(sender_id, 15.0, context)
+            new_bal = await credit_user(sender_id, 16.0, context)
             await _send_to_admins_async(
                 context,
                 lambda admin_id: context.bot.send_message(
-                    admin_id, f"✅ Автору (ID {sender_id}) начислено 15 руб. Новый баланс: {new_bal:.2f} руб."
+                        admin_id, f"✅ Автору (ID HIDDEN) начислено 15 руб. Новый баланс: {new_bal:.2f} руб."
                 ),
             )
         except Exception:
@@ -815,12 +871,15 @@ async def withdraw_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
     user_id = query.from_user.id
     balance = get_balance(user_id)
+    print(f"💸 Пользователь {user_id} запросил вывод, баланс {balance:.2f}")
     if balance < 200:
         user_states[user_id] = {}
         await show_main_menu(user_id, context, "⚠️ Нельзя вывести меньше 200 руб. Возврат в меню.")
         return
     state = user_states.get(user_id, {})
     state["awaiting_withdraw"] = True
+    state.pop("awaiting_withdraw_confirm", None)
+    state.pop("withdraw_card", None)
     user_states[user_id] = state
     await send_or_edit(context, user_id, f"💸 На балансе {balance:.2f} руб. Укажите карту или номер СБП для вывода:")
 
@@ -844,9 +903,13 @@ async def delete_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+    print(f"🗑 Пользователь {user_id} нажал 'Удалить пост'")
     state = user_states.get(user_id, {})
     state["awaiting_delete_link"] = True
     state["awaiting_delete_reason"] = False
+    state.pop("awaiting_delete_confirm", None)
+    state.pop("delete_link", None)
+    state.pop("delete_reason", None)
     user_states[user_id] = state
     await send_or_edit(context, user_id, "🔗 Введите ссылку на пост из канала:")
 
@@ -902,25 +965,83 @@ async def sync_db_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
-async def caption_collector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Сохранить подпись к уже загруженному медиа."""
+async def withdraw_confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработать подтверждение или отмену вывода средств."""
 
-    if not update.message or update.message.chat.type != "private":
-        return
-    user_id = update.message.from_user.id
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    user_id = user.id
     state = user_states.get(user_id, {})
-    if state.get("awaiting_caption"):
-        state["pending_caption"] = update.message.text
-        state.pop("awaiting_caption", None)
-        user_states[user_id] = state
-        keyboard = [[InlineKeyboardButton("✅ Отправить", callback_data="confirm_send"), InlineKeyboardButton("❌ Отменить", callback_data="cancel_send")]]
-        await send_or_edit(
+    action = query.data
+
+    if action == "withdraw_confirm" and state.get("awaiting_withdraw_confirm"):
+        card = state.get("withdraw_card", "—")
+        balance = get_balance(user_id)
+        set_balance(user_id, 0.0)
+        await _send_to_admins_async(
             context,
-            user_id,
-            "✅ Подпись сохранена! Отправить сообщение админу?",
-            InlineKeyboardMarkup(keyboard),
-            allow_edit=False,
+            lambda admin_id: context.bot.send_message(
+                admin_id,
+                (
+                    "Запрос на вывод средств\n"
+                    f"Пользователь: @{user.username or '—'}\n"
+                    f"ID: {user.id}\n"
+                    f"Сумма: {balance:.2f} руб.\n"
+                    f"Реквизиты: {card}"
+                ),
+            ),
         )
+        print(
+            f"💸 Подтверждён вывод: пользователь {user.id} ({user.username or '—'}), сумма {balance:.2f}, реквизиты {card}"
+        )
+        user_states[user_id] = {}
+        await show_main_menu(user_id, context, "✅ Запрос на вывод отправлен. Баланс обнулён.", allow_edit=False)
+    elif action == "withdraw_cancel":
+        user_states[user_id] = {}
+        print(f"💸 Пользователь {user_id} отменил вывод средств")
+        await show_main_menu(user_id, context, "❌ Вывод отменён.", allow_edit=False)
+    else:
+        await query.answer("⚠️ Нет активного запроса на вывод", show_alert=True)
+
+
+async def delete_confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработать подтверждение или отмену удаления поста."""
+
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    user_id = user.id
+    state = user_states.get(user_id, {})
+    action = query.data
+
+    if action == "delete_confirm" and state.get("awaiting_delete_confirm"):
+        link = state.get("delete_link", "—")
+        reason = state.get("delete_reason", "—")
+        await _send_to_admins_async(
+            context,
+            lambda admin_id: context.bot.send_message(
+                admin_id,
+                (
+                    "Удаление поста\n"
+                    f"Ссылка: {link}\n"
+                    f"Причина: {reason}\n"
+                    f"ID: {user.id}\n"
+                    f"Пользователь: @{user.username or '—'}"
+                ),
+            ),
+        )
+        print(
+            f"🗑 Подтверждён запрос удаления: пользователь {user.id} ({user.username or '—'}), ссылка {link}, причина: {reason}"
+        )
+        user_states[user_id] = {}
+        await show_main_menu(user_id, context, "✅ Запрос на удаление отправлен администратору.", allow_edit=False)
+    elif action == "delete_cancel":
+        user_states[user_id] = {}
+        print(f"🗑 Пользователь {user_id} отменил запрос на удаление поста")
+        await show_main_menu(user_id, context, "❌ Запрос на удаление отменён.", allow_edit=False)
+    else:
+        await query.answer("⚠️ Нет активного запроса на удаление", show_alert=True)
 
 
 def main() -> None:
@@ -938,13 +1059,14 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(add_caption_handler, pattern="^add_caption$"))
     app.add_handler(CallbackQueryHandler(profile_handler, pattern="^profile$"))
     app.add_handler(CallbackQueryHandler(withdraw_handler, pattern="^withdraw$"))
+    app.add_handler(CallbackQueryHandler(withdraw_confirm_handler, pattern="^withdraw_(confirm|cancel)$"))
     app.add_handler(CallbackQueryHandler(links_handler, pattern="^links$"))
     app.add_handler(CallbackQueryHandler(delete_post_handler, pattern="^delete_post$"))
+    app.add_handler(CallbackQueryHandler(delete_confirm_handler, pattern="^delete_(confirm|cancel)$"))
     app.add_handler(CallbackQueryHandler(admin_panel_handler, pattern="^admin_panel$"))
     app.add_handler(CallbackQueryHandler(broadcast_start_handler, pattern="^broadcast_start$"))
     app.add_handler(CallbackQueryHandler(sync_db_handler, pattern="^sync_db$"))
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, caption_collector))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
     print("🤖 Бот запущен...")
