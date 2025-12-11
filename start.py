@@ -603,6 +603,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if state.get("awaiting_caption") and update.message.text:
+        state["pending_caption"] = update.message.text
+        state.pop("awaiting_caption", None)
+        user_states[user_id] = state
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Отправить", callback_data="confirm_send"),
+                InlineKeyboardButton("❌ Отменить", callback_data="cancel_send"),
+            ]
+        ]
+        await send_or_edit(
+            context,
+            user_id,
+            "✅ Подпись сохранена! Отправить сообщение админу?",
+            InlineKeyboardMarkup(keyboard),
+            allow_edit=False,
+        )
+        return
+
     if not state:
         await show_main_menu(user_id, context, "⚠️ Сначала нажмите /start для выбора действия.", allow_edit=False)
         return
@@ -1025,27 +1044,6 @@ async def delete_confirm_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer("⚠️ Нет активного запроса на удаление", show_alert=True)
 
 
-async def caption_collector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Сохранить подпись к уже загруженному медиа."""
-
-    if not update.message or update.message.chat.type != "private":
-        return
-    user_id = update.message.from_user.id
-    state = user_states.get(user_id, {})
-    if state.get("awaiting_caption"):
-        state["pending_caption"] = update.message.text
-        state.pop("awaiting_caption", None)
-        user_states[user_id] = state
-        keyboard = [[InlineKeyboardButton("✅ Отправить", callback_data="confirm_send"), InlineKeyboardButton("❌ Отменить", callback_data="cancel_send")]]
-        await send_or_edit(
-            context,
-            user_id,
-            "✅ Подпись сохранена! Отправить сообщение админу?",
-            InlineKeyboardMarkup(keyboard),
-            allow_edit=False,
-        )
-
-
 def main() -> None:
     """Точка входа: инициализация БД, хэндлеров и запуск бота."""
 
@@ -1069,7 +1067,6 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(broadcast_start_handler, pattern="^broadcast_start$"))
     app.add_handler(CallbackQueryHandler(sync_db_handler, pattern="^sync_db$"))
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, caption_collector))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
     print("🤖 Бот запущен...")
