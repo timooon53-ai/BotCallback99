@@ -708,32 +708,32 @@ async def confirm_or_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     post_cb = f"post_channel:{user.id}"
     caption_text = "📨 Анонимное сообщение" if mode == "anon" else f"👤 От {user.first_name} (ID: {user.id})"
     media_caption = state.get("pending_caption", "")
+    original_caption = pending_message.caption or "" if hasattr(pending_message, "caption") else ""
     media_path = state.get("pending_media_path")
     if media_caption:
         caption_text += f"\n\n💬 {media_caption}"
+    elif original_caption:
+        caption_text += f"\n\n💬 {original_caption}"
 
     admin_keyboard = [[InlineKeyboardButton("📢 Запостить в канал", callback_data=post_cb)]]
     admin_markup = InlineKeyboardMarkup(admin_keyboard)
 
     async def send_to_admin(admin_id: int) -> None:
+        print(f"📨 Готовлю отправку сообщения пользователю {user_id} админу {admin_id}")
         if msg_type == "text":
             text_to_send = pending_message.text
             await context.bot.send_message(
                 chat_id=admin_id, text=f"{caption_text}\n\n{text_to_send}", reply_markup=admin_markup
             )
         else:
-            if msg_type == "photo":
-                await context.bot.send_photo(
-                    chat_id=admin_id, photo=pending_message.photo[-1].file_id, caption=caption_text, reply_markup=admin_markup
-                )
-            elif msg_type == "video":
-                await context.bot.send_video(
-                    chat_id=admin_id, video=pending_message.video.file_id, caption=caption_text, reply_markup=admin_markup
-                )
-            elif msg_type == "audio":
-                await context.bot.send_audio(
-                    chat_id=admin_id, audio=pending_message.audio.file_id, caption=caption_text, reply_markup=admin_markup
-                )
+            await context.bot.copy_message(
+                chat_id=admin_id,
+                from_chat_id=user_id,
+                message_id=pending_message.message_id,
+                caption=caption_text,
+                reply_markup=admin_markup,
+            )
+        print(f"✅ Сообщение пользователя {user_id} доставлено админу {admin_id}")
 
     try:
         await _send_to_admins_async(context, send_to_admin)
