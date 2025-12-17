@@ -36,22 +36,30 @@ CHANNEL_ID = CHANNEL_FOR_PODPISKA
 
 # Корневая директория проекта.
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def _project_path(*parts: str) -> Path:
+    """Построить путь относительно корня проекта (кросс-платформенно)."""
+
+    return BASE_DIR.joinpath(*parts)
+
+
 # Каталог для хранения данных пользователей.
-DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR = _project_path("data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Каталог для сохранения всех входящих медиафайлов.
-MEDIA_DIR = BASE_DIR / "media_daun"
-MEDIA_DIR.mkdir(exist_ok=True)
+MEDIA_DIR = _project_path("media_daun")
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Пути к файлам с пользователями, историей и балансами.
-USERS_FILE = DATA_DIR / "users.txt"
-HISTORY_FILE = DATA_DIR / "history.txt"
-BALANCE_FILE = DATA_DIR / "balance.txt"
+USERS_FILE = _project_path("data", "users.txt")
+HISTORY_FILE = _project_path("data", "history.txt")
+BALANCE_FILE = _project_path("data", "balance.txt")
 # Путь к резервному видео, если пост без медиа.
-VIDEO_FALLBACK_PATH = BASE_DIR / "youra.mp4"
+VIDEO_FALLBACK_PATH = _project_path("youra.mp4")
 # Путь к базе данных SQLite, где дублируются данные из текстовых файлов.
-DB_PATH = DATA_DIR / "bot.db"
+DB_PATH = _project_path("data", "bot.db")
 
 # Состояния пользователей во время диалога с ботом.
 user_states: Dict[int, Dict] = {}
