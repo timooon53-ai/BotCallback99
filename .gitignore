@@ -15,3 +15,7 @@ __pycache__/
 *.sqlite
 *.mp4
 data/
+.xml
+.idea
+/data
+/media_daun
